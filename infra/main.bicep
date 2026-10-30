@@ -87,8 +87,9 @@ resource embedding 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01'
   properties: { model: { format: 'OpenAI', name: 'text-embedding-3-small', version: '1' } }
 }
 
+// Flexible Server names are global, and a failed create keeps the name reserved for a while; the suffix sidesteps that.
 resource pg 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
-  name: '${name}-pg'
+  name: '${name}-pg-${take(uniqueString(resourceGroup().id), 6)}'
   location: pgLocation
   sku: { name: pgSku, tier: 'Burstable' }
   properties: {
