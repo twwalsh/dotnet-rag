@@ -3,11 +3,11 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY global.json Directory.Build.props Directory.Packages.props ./
-COPY src/SupportRag.Core/SupportRag.Core.csproj src/SupportRag.Core/
-COPY src/SupportRag.Api/SupportRag.Api.csproj src/SupportRag.Api/
-RUN dotnet restore src/SupportRag.Api/SupportRag.Api.csproj
-COPY src/ src/
-RUN dotnet publish src/SupportRag.Api/SupportRag.Api.csproj -c Release -o /app --no-restore
+COPY src/SupportRag.Core/ src/SupportRag.Core/
+COPY src/SupportRag.Api/ src/SupportRag.Api/
+# One step, restore included: a split restore/publish (--no-restore) failed on the registry's builder with
+# NETSDK1064 (a package "not found" after restore). The cache saving is not worth that failure mode here.
+RUN dotnet publish src/SupportRag.Api/SupportRag.Api.csproj -c Release -o /app
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS run
 WORKDIR /app
