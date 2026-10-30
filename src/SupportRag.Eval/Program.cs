@@ -108,12 +108,30 @@ return rate >= minPass ? 0 : 1;
 // The deployed API's wire shape, mapped back onto AskResult so the scoring code is shared.
 static async Task<AskResult> AskOverHttpAsync(HttpClient http, string baseUrl, string question)
 {
-    using var response = await http.PostAsJsonAsync(new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), "ask"), new { question });
-    response.EnsureSuccessStatusCode();
-    var body = await response.Content.ReadFromJsonAsync<ApiAnswer>(EvalJson.Options) ?? throw new InvalidOperationException("empty response");
-    return new AskResult(question, body.Answer, body.Form, body.Model,
-        body.Passages.Select(p => new SupportRag.Core.Retrieval.Passage(p.Id, "", p.Title, p.Url, "", p.Score)).ToList(),
-        body.Sources, body.Usage);
+    // The API rate-limits per client address (20 a minute); a 30-question run trips it once. Honour Retry-After, or wait out the window.
+    HttpResponseMessage response;
+    for (var attempt = 0; ; attempt++)
+    {
+        response = await http.PostAsJsonAsync(new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), "ask"), new { question });
+        if (response.StatusCode != System.Net.HttpStatusCode.TooManyRequests || attempt >= 3)
+        {
+            break;
+        }
+
+        var wait = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(61);
+        Console.Write($"[429, waiting {wait.TotalSeconds:F0}s]");
+        response.Dispose();
+        await Task.Delay(wait);
+    }
+
+    using (response)
+    {
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadFromJsonAsync<ApiAnswer>(EvalJson.Options) ?? throw new InvalidOperationException("empty response");
+        return new AskResult(question, body.Answer, body.Form, body.Model,
+            body.Passages.Select(p => new SupportRag.Core.Retrieval.Passage(p.Id, "", p.Title, p.Url, "", p.Score)).ToList(),
+            body.Sources, body.Usage);
+    }
 }
 
 static string? Arg(string name)
