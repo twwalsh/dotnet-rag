@@ -3,11 +3,13 @@
 //   dotnet run --project src/SupportRag.Eval                 # all cases, summary + every miss
 //   dotnet run --project src/SupportRag.Eval -- --json eval/latest.json --min 0.8
 //   dotnet run --project src/SupportRag.Eval -- --ingest             # migrate + ingest first (CI, a fresh database)
+//   dotnet run --project src/SupportRag.Eval -- --api https://<host>  # score a DEPLOYED instance over HTTP instead of in-process
 //
 // The cases are data/eval.jsonl, copied verbatim from the Cloudflare build: a question, `must` regexes
 // the answer has to match, `mustNot` ones it must not, and sometimes the self-service `form` it has to
 // offer. A case passes strictly when every one of its rules holds, which is how all three builds report,
 // so a .NET score, a Databricks score and a Cloudflare score mean the same thing. Exit code 1 below --min.
+using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -22,9 +24,11 @@ using SupportRag.Core.Ingest;
 using SupportRag.Core.Pipeline;
 
 var jsonOut = Arg("--json");
+var apiBase = Arg("--api");
 var minPass = double.Parse(Arg("--min") ?? "0", System.Globalization.CultureInfo.InvariantCulture);
 var casesPath = Arg("--cases") ?? "data/eval.jsonl";
 
+using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
 var host = Host.CreateApplicationBuilder(args);
 // The generic host reads appsettings.json from the working directory; this tool is run from the repo root,
 // so its own settings file (copied beside the binary) is added explicitly. Environment variables still win.
@@ -50,9 +54,17 @@ var cases = File.ReadLines(casesPath)
 var results = new List<CaseResult>(cases.Count);
 foreach (var c in cases)
 {
-    using var scope = app.Services.CreateScope();
-    var assistant = scope.ServiceProvider.GetRequiredService<SupportAssistant>();
-    var r = await assistant.AskAsync(c.Q, CancellationToken.None);
+    AskResult r;
+    if (apiBase is not null)
+    {
+        r = await AskOverHttpAsync(httpClient, apiBase, c.Q);
+    }
+    else
+    {
+        using var scope = app.Services.CreateScope();
+        r = await scope.ServiceProvider.GetRequiredService<SupportAssistant>().AskAsync(c.Q, CancellationToken.None);
+    }
+
     var problems = new List<string>();
     problems.AddRange(c.Must.Where(p => !Regex.IsMatch(r.Answer, p, RegexOptions.IgnoreCase)).Select(p => $"missing /{p}/"));
     problems.AddRange(c.MustNot.Where(p => Regex.IsMatch(r.Answer, p, RegexOptions.IgnoreCase)).Select(p => $"said /{p}/"));
@@ -93,6 +105,17 @@ if (jsonOut is not null)
 var rate = (double)strict / n;
 return rate >= minPass ? 0 : 1;
 
+// The deployed API's wire shape, mapped back onto AskResult so the scoring code is shared.
+static async Task<AskResult> AskOverHttpAsync(HttpClient http, string baseUrl, string question)
+{
+    using var response = await http.PostAsJsonAsync(new Uri(new Uri(baseUrl.TrimEnd('/') + "/"), "ask"), new { question });
+    response.EnsureSuccessStatusCode();
+    var body = await response.Content.ReadFromJsonAsync<ApiAnswer>(EvalJson.Options) ?? throw new InvalidOperationException("empty response");
+    return new AskResult(question, body.Answer, body.Form, body.Model,
+        body.Passages.Select(p => new SupportRag.Core.Retrieval.Passage(p.Id, "", p.Title, p.Url, "", p.Score)).ToList(),
+        body.Sources, body.Usage);
+}
+
 static string? Arg(string name)
 {
     var argv = Environment.GetCommandLineArgs();
@@ -105,6 +128,10 @@ internal sealed record EvalCase(
     [property: JsonPropertyName("must")] List<string> Must,
     [property: JsonPropertyName("mustNot")] List<string> MustNot,
     [property: JsonPropertyName("form")] string? Form);
+
+internal sealed record ApiAnswer(string Answer, string? Form, List<SourceLink> Sources, List<ApiPassage> Passages, string? Model, Usage Usage);
+
+internal sealed record ApiPassage(string Id, string Title, string Url, double Score);
 
 internal sealed record CaseResult(string Question, string Answer, string? Form, List<string> Sources, List<string> Passages, List<string> Problems, Usage Usage);
 
