@@ -9,8 +9,9 @@ matters for a support bot, *does it answer correctly from the documents and refu
 
 It runs on .NET 10 with EF Core, pgvector and Postgres full-text search, calls Claude through the official
 C# SDK, embeds with Azure OpenAI (or, for a like-for-like retrieval comparison, the same Workers AI model the
-site uses), reports traces and metrics over OpenTelemetry, and deploys to Azure Container Apps from a Bicep
-template. It is a working demo, not the production assistant; that stays on Cloudflare, where the site runs.
+site uses), reports traces and metrics over OpenTelemetry, and runs on Azure Container Apps from a Bicep
+template. **Try it at [twwalsh.com/ask-dotnet](https://twwalsh.com/ask-dotnet/).** It is a working demo, not the
+production assistant; that stays on Cloudflare, where the site runs.
 
 ## What runs where
 
@@ -109,12 +110,29 @@ Idempotency, measured: the second `--ingest` on the same file reported `219 unch
 - **Secrets never touch the repo.** Locally they come from 1Password at run time (`op run`); in Azure the
   Anthropic key is a Container Apps secret and the embedding call uses the app's managed identity.
 
+## Deployed
+
+Live since 2026-10-30 on Azure, behind a front door at [twwalsh.com/ask-dotnet](https://twwalsh.com/ask-dotnet/)
+(a Cloudflare Worker route with Turnstile that carries the question to the app and the answer back, the same
+shape as the Databricks demo's door). `infra/main.bicep`, deployed twice as its header says:
+
+- **Container Apps** (East US), scale to zero, one replica, the image built *in* the registry with `az acr build`
+  because the laptop has no Docker; the app pulls it with a **user-assigned identity** (AcrPull) and calls
+  **Azure OpenAI** with the same identity (Cognitive Services OpenAI User). No registry password, no OpenAI key.
+- **Azure OpenAI** `text-embedding-3-small`, so the deployed index differs from the local Workers AI one only in
+  the embedding model, and the ingest knew: on first boot it embedded all 219 chunks under the new model id.
+- **Postgres Flexible Server** B1ms in **Central US**, not East US, because this subscription gets
+  "Provisioning is restricted in this region" for East US and `SkuNotAvailable` for East US 2 while the SKU
+  listing advertises both. The region is a parameter for that reason. A failed create also keeps the server
+  name reserved for a while, hence the unique suffix.
+- **Scored over HTTP** with `SupportRag.Eval --api <url>`: **30/30 strict**, 2.2 s a question, 47.9k input tokens
+  (34.5k from the prompt cache). The eval runner now waits out the app's own per-IP rate limit, which it tripped
+  at question 21, as a client should.
+
+Secrets: the Anthropic key and the admin key are Container Apps secrets; the Postgres password lives in
+1Password and in the app's connection-string secret. Nothing is in the repo or the CI configuration.
+
 ## Not built (yet)
 
-- The Azure deployment itself. `infra/main.bicep` and the Dockerfile are written and reviewed but have not been
-  exercised: there is no Azure subscription behind this repo yet, and the laptop that built it has no Docker.
-  The CI workflow builds the image on every push, so the Dockerfile is at least checked there.
 - Streaming. The Worker streams; this API returns the whole answer, as the Databricks build does.
 - Conversation turns. One question in, one answer out; the Worker carries up to six turns.
-- A public front door. The plan is the same as the Databricks demo: a route on twwalsh.com with Turnstile in
-  front, carrying the question to the Azure app and the answer back.
