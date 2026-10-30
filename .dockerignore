@@ -1,0 +1,11 @@
+# Keep the build context to the source: the last context upload was 75 MiB of bin/, obj/ and git history.
+.git
+.github
+**/bin
+**/obj
+tests
+eval
+infra
+*.md
+.env*
+.config
