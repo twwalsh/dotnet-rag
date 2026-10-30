@@ -25,7 +25,9 @@ param pgPassword string
 param adminKey string
 param pgAdminUser string = 'rag'
 @description('Postgres Flexible Server region. Separate because East US refuses Postgres provisioning on some subscriptions ("Provisioning is restricted in this region") while serving everything else.')
-param pgLocation string = 'eastus2'
+param pgLocation string = 'centralus'
+@description('Postgres compute. Burstable B1ms is the cheapest; some subscriptions get SkuNotAvailable for it in a region the SKU listing still advertises, in which case try B2s or another region.')
+param pgSku string = 'Standard_B1ms'
 param embeddingDeployment string = 'text-embedding-3-small'
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
@@ -88,7 +90,7 @@ resource embedding 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01'
 resource pg 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
   name: '${name}-pg'
   location: pgLocation
-  sku: { name: 'Standard_B1ms', tier: 'Burstable' }
+  sku: { name: pgSku, tier: 'Burstable' }
   properties: {
     version: '17'
     administratorLogin: pgAdminUser
