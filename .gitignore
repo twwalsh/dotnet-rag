@@ -1,0 +1,10 @@
+bin/
+obj/
+*.user
+.vs/
+.idea/
+*.swp
+.env
+.env.local
+TestResults/
+appsettings.Development.local.json

@@ -1,0 +1,5 @@
+# EF Core writes these; they are not held to the repo's style or analyzer rules.
+[*.cs]
+generated_code = true
+dotnet_analyzer_diagnostic.severity = none
+dotnet_diagnostic.IDE0161.severity = none

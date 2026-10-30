@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: dotnet restore
+      - run: dotnet build --no-restore -c Release
+      - run: dotnet test --no-build -c Release --logger "trx;LogFileName=tests.trx"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: '**/TestResults/*.trx'
+
+  image:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: support-rag:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # The 30-case evaluation against a real Postgres and the real models. Runs on main and on demand, and only
+  # where the secrets exist (a fork has none). The 80 % strict gate is the same bar the Databricks build's
+  # champion alias uses; below it the job fails and nothing should be promoted.
+  eval:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag
+          POSTGRES_DB: support_rag
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U rag" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      ConnectionStrings__Rag: Host=localhost;Database=support_rag;Username=rag;Password=rag
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      Rag__Embedder: WorkersAi
+      Rag__WorkersAi__AccountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: skip when secrets are absent
+        id: gate
+        run: echo "run=${{ secrets.ANTHROPIC_API_KEY != '' }}" >> "$GITHUB_OUTPUT"
+      - if: steps.gate.outputs.run == 'true'
+        run: dotnet run --project src/SupportRag.Eval -c Release -- --ingest --json eval/latest.json --min 0.8
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.gate.outputs.run == 'true'
+        with:
+          name: eval
+          path: eval/latest.json
