@@ -143,8 +143,9 @@ halves, then `chat claude-haiku-5-5` with model, finish reason, input/output/cac
 `rag.outcome` of `answered`, `form`, `handoff` or `refused` on the agent span. Those attributes are what an AI
 observability backend keys on, so no vendor SDK is involved; the backend is three environment variables.
 **It runs under Dynatrace's AI Observability**, wired, queried and alerted as [dynatrace/README.md](dynatrace/README.md)
-describes. First run 2026-11-02: the 30-case eval from a laptop through the exporter, 29/30 strict (one
-missed `show_form` call, the model's, not the telemetry's), every question a trace in the tenant.
+describes. First runs, 2026-11-02: the 30-case eval from a laptop through the exporter, 29/30 strict (one
+missed `show_form` call, the model's, not the telemetry's), then the Azure instance on the same build, **30/30
+strict, 2.18 s a question**, every question a trace in the tenant under `deployment.environment.name = azure`.
 
 ## Not built (yet)
 

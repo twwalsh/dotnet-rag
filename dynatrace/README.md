@@ -107,5 +107,11 @@ nightly ingest is the first suspect.
 
 ## Verified
 
-- 2026-11-02, laptop → Dynatrace trial tenant: the 30-case eval run over HTTP against the local API, exporter
-  self-diagnostics on; see the repository README for the result and the screenshots.
+- 2026-11-02, laptop → the tenant: the 30-case eval over HTTP against the local API (29/30 strict; the miss was
+  a `show_form` call the model skipped). Services showed `support-rag` as an ASP.NET service with `POST /ask`
+  at 0 % failures, p50 2.02 s, throughput matching the run.
+- 2026-11-02, Azure Container Apps → the tenant: revision 3 on image `8a87f70` with the three variables above;
+  the same eval against the public URL, **30/30 strict, 2.18 s a question, 47.9k input tokens (33.3k from the
+  prompt cache)**, `deployment.environment.name = azure`.
+- The tenant is a 15-day trial. When it lapses the exporter will get 4xx responses and drop batches; the app is
+  unaffected. Remove the three `OTEL_EXPORTER_OTLP_*` variables (or point them elsewhere) at that point.
