@@ -77,7 +77,7 @@ public sealed class Retriever(RagDbContext db, IEmbedder embedder, IOptions<RagO
     private async Task<float[]> EmbedQueryAsync(string question, CancellationToken ct)
     {
         var (provider, model) = ProviderAndModel(embedder.ModelId);
-        using var activity = Instrumentation.Source.StartActivity($"embeddings {model}");
+        using var activity = Instrumentation.Source.StartActivity($"embeddings {model}", System.Diagnostics.ActivityKind.Client);
         activity?.SetTag(Instrumentation.GenAi.OperationName, "embeddings");
         activity?.SetTag(Instrumentation.GenAi.ProviderName, provider);
         activity?.SetTag(Instrumentation.GenAi.System, provider);

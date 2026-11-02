@@ -36,7 +36,7 @@ public sealed class Answerer(AnthropicClient client, IOptions<RagOptions> option
     public async Task<Answer> AnswerAsync(string question, IReadOnlyList<Passage> passages, CancellationToken ct)
     {
         // The chat span, named and attributed per the OTel GenAI conventions: "{operation} {model}".
-        using var activity = Instrumentation.Source.StartActivity($"chat {_o.Model}");
+        using var activity = Instrumentation.Source.StartActivity($"chat {_o.Model}", ActivityKind.Client); // GenAI conventions: inference calls are CLIENT spans
         activity?.SetTag(Instrumentation.GenAi.OperationName, "chat");
         activity?.SetTag(Instrumentation.GenAi.ProviderName, "anthropic");
         activity?.SetTag(Instrumentation.GenAi.System, "anthropic");
