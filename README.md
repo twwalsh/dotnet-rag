@@ -25,7 +25,7 @@ production assistant; that stays on Cloudflare, where the site runs.
 | Generation | Claude Haiku via AI Gateway, streamed; `show_form` tool | Llama 3.3 70B via a Unity Gateway service; tagged last line | **Claude Haiku via the official C# SDK; `show_form` tool, prompt caching** |
 | Ingest | script, run by hand | serverless job (DAB) | **a `BackgroundService`, nightly and on an empty table; idempotent by content hash and embedding model** |
 | Evaluation | `support-eval.mjs` | MLflow GenAI scorers | **`SupportRag.Eval`, in-process, same rules, exit code gate** |
-| Telemetry | AI Gateway logs | inference table + MLflow traces | **OpenTelemetry traces + metrics (ASP.NET Core, HttpClient, Npgsql, the pipeline) → OTLP** |
+| Telemetry | AI Gateway logs | inference table + MLflow traces | **OpenTelemetry traces, metrics and logs → OTLP, with the GenAI semantic conventions on the agent, embedding and chat spans; running under [Dynatrace](dynatrace/README.md)** |
 | Deployment | `wrangler deploy` | Declarative Automation Bundle | **Dockerfile + `infra/main.bicep` → Azure Container Apps, managed identity to Azure OpenAI** |
 
 ## Layout
@@ -41,11 +41,12 @@ src/SupportRag.Core/           the pipeline, host-agnostic
   Generation/                    Prompts (the site's prompt, verbatim), Answerer (one Messages call), Answer.Fold
   Ingest/                        IngestPlan (the diff, pure), CorpusIngestor, NightlyIngestService
   Pipeline/SupportAssistant.cs   retrieve → refuse on empty → answer → sources
-  Telemetry/Instrumentation.cs   one ActivitySource, one Meter
+  Telemetry/Instrumentation.cs   one ActivitySource, one Meter, the gen_ai.* attribute names
 src/SupportRag.Api/            minimal API: POST /ask, POST /admin/ingest, GET /healthz; rate limiting; OpenTelemetry
 src/SupportRag.Eval/           the eval runner (and --ingest for a fresh database)
 tests/SupportRag.Tests/        xunit: the pure parts
-infra/main.bicep               Container Apps + Azure OpenAI + Postgres Flexible Server, declared
+infra/main.bicep               Container Apps + Azure OpenAI + Postgres Flexible Server, declared (+ the OTLP endpoint and token)
+dynatrace/README.md            the assistant under Dynatrace: wiring, trace shape, DQL for a dashboard, one alert
 Dockerfile · Makefile · .github/workflows/ci.yml
 ```
 
@@ -131,6 +132,19 @@ shape as the Databricks demo's door). `infra/main.bicep`, deployed twice as its 
 
 Secrets: the Anthropic key and the admin key are Container Apps secrets; the Postgres password lives in
 1Password and in the app's connection-string secret. Nothing is in the repo or the CI configuration.
+
+## Observed
+
+The point of a support assistant in production is not the demo answer but knowing, a month later, whether it
+is still answering, what it costs and when it is quietly refusing. The API ships traces, metrics and logs over
+OTLP with the [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/):
+one trace per question, four spans deep (`invoke_agent` → `rag.retrieve` → `embeddings …` + the two Postgres
+halves, then `chat claude-haiku-5-5` with model, finish reason, input/output/cache-read tokens), and an
+`rag.outcome` of `answered`, `form`, `handoff` or `refused` on the agent span. Those attributes are what an AI
+observability backend keys on, so no vendor SDK is involved; the backend is three environment variables.
+**It runs under Dynatrace's AI Observability**, wired, queried and alerted as [dynatrace/README.md](dynatrace/README.md)
+describes. First run 2026-11-02: the 30-case eval from a laptop through the exporter, 29/30 strict (one
+missed `show_form` call, the model's, not the telemetry's), every question a trace in the tenant.
 
 ## Not built (yet)
 
