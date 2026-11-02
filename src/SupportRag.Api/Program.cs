@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -34,11 +35,21 @@ builder.Services.AddRateLimiter(o =>
     };
 });
 
-// Traces and metrics from the pipeline, ASP.NET Core, HttpClient (Anthropic, Azure OpenAI, Workers AI) and Npgsql.
-// OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set (the Datadog Agent or Azure's managed collector); console in Development.
+// Traces, metrics and logs from the pipeline, ASP.NET Core, HttpClient (Anthropic, Azure OpenAI, Workers AI) and Npgsql.
+// OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set; console in Development. The exporter reads the standard
+// OTEL_EXPORTER_OTLP_* variables, so a backend is a matter of environment, not code: a local Datadog Agent
+// (gRPC, no headers) or Dynatrace (https://<env>.live.dynatrace.com/api/v2/otlp, OTEL_EXPORTER_OTLP_PROTOCOL=
+// http/protobuf, OTEL_EXPORTER_OTLP_HEADERS="Authorization=Api-Token <token>"). Metrics go out with delta
+// temporality, which Dynatrace requires and every other OTLP backend accepts.
 var otlp = builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+var deploymentEnvironment = builder.Configuration["DEPLOYMENT_ENVIRONMENT"] ?? builder.Environment.EnvironmentName.ToLowerInvariant();
 builder.Services.AddOpenTelemetry()
-    .ConfigureResource(r => r.AddService("support-rag", serviceVersion: typeof(Program).Assembly.GetName().Version?.ToString()))
+    .ConfigureResource(r => r
+        .AddService("support-rag", serviceNamespace: "fruitless-research", serviceVersion: typeof(Program).Assembly.GetName().Version?.ToString())
+        .AddAttributes([
+            new KeyValuePair<string, object>("deployment.environment.name", deploymentEnvironment),
+            new KeyValuePair<string, object>("gen_ai.agent.name", SupportAssistant.AgentName),
+        ]))
     .WithTracing(t =>
     {
         t.AddSource(Instrumentation.Name).AddAspNetCoreInstrumentation().AddHttpClientInstrumentation().AddNpgsql();
@@ -48,7 +59,16 @@ builder.Services.AddOpenTelemetry()
     .WithMetrics(m =>
     {
         m.AddMeter(Instrumentation.Name).AddAspNetCoreInstrumentation().AddHttpClientInstrumentation().AddRuntimeInstrumentation();
-        if (otlp is not null) { m.AddOtlpExporter(); }
+        if (otlp is not null) { m.AddOtlpExporter((_, reader) => reader.TemporalityPreference = MetricReaderTemporalityPreference.Delta); }
+    })
+    .WithLogging(l =>
+    {
+        if (otlp is not null) { l.AddOtlpExporter(); }
+    }, o =>
+    {
+        o.IncludeFormattedMessage = true;
+        o.IncludeScopes = true;
+        o.ParseStateValues = true;
     });
 
 var app = builder.Build();

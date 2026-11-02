@@ -10,6 +10,7 @@
 //   az deployment group create -g rg-support-rag -f infra/main.bicep -p anthropicApiKey=... pgPassword=... adminKey=...
 //   az acr build -r <registry> -t support-rag:<sha> .
 //   az deployment group create -g rg-support-rag -f infra/main.bicep -p image=<registry>.azurecr.io/support-rag:<sha> ...
+// Telemetry: pass otlpEndpoint + otlpToken to ship traces, metrics and logs to an OTLP backend (Dynatrace here).
 targetScope = 'resourceGroup'
 
 @description('Short name used as a prefix for every resource.')
@@ -29,6 +30,13 @@ param pgLocation string = 'centralus'
 @description('Postgres compute. Burstable B1ms is the cheapest; some subscriptions get SkuNotAvailable for it in a region the SKU listing still advertises, in which case try B2s or another region.')
 param pgSku string = 'Standard_B1ms'
 param embeddingDeployment string = 'text-embedding-3-small'
+@description('OTLP endpoint for traces, metrics and logs (Dynatrace: https://<env>.live.dynatrace.com/api/v2/otlp). Empty = no export.')
+param otlpEndpoint string = ''
+@description('Bearer for the OTLP endpoint: a Dynatrace API token with openTelemetryTrace.ingest, metrics.ingest and logs.ingest. Lands in a Container Apps secret as the Authorization header value.')
+@secure()
+param otlpToken string = ''
+@description('deployment.environment.name on every signal.')
+param deploymentEnvironment string = 'azure'
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: '${name}-logs'
@@ -146,6 +154,8 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
         { name: 'anthropic-api-key', value: anthropicApiKey }
         { name: 'admin-key', value: adminKey }
         { name: 'pg-connection', value: 'Host=${pg.properties.fullyQualifiedDomainName};Database=support_rag;Username=${pgAdminUser};Password=${pgPassword};SSL Mode=Require' }
+        // The whole header line is the secret, so the token never appears as a plain env value.
+        { name: 'otlp-headers', value: empty(otlpToken) ? 'x-unused=1' : 'Authorization=Api-Token ${otlpToken}' }
       ]
     }
     template: {
@@ -154,7 +164,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'api'
           image: image
           resources: { cpu: json('0.5'), memory: '1Gi' }
-          env: [
+          env: concat([
             { name: 'ANTHROPIC_API_KEY', secretRef: 'anthropic-api-key' }
             { name: 'RAG_ADMIN_KEY', secretRef: 'admin-key' }
             { name: 'ConnectionStrings__Rag', secretRef: 'pg-connection' }
@@ -164,7 +174,12 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'Rag__AzureOpenAI__UseManagedIdentity', value: 'true' }
             { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
             { name: 'ASPNETCORE_ENVIRONMENT', value: 'Production' }
-          ]
+            { name: 'DEPLOYMENT_ENVIRONMENT', value: deploymentEnvironment }
+          ], empty(otlpEndpoint) ? [] : [
+            { name: 'OTEL_EXPORTER_OTLP_ENDPOINT', value: otlpEndpoint }
+            { name: 'OTEL_EXPORTER_OTLP_PROTOCOL', value: 'http/protobuf' }
+            { name: 'OTEL_EXPORTER_OTLP_HEADERS', secretRef: 'otlp-headers' }
+          ])
           probes: [
             { type: 'Readiness', httpGet: { path: '/healthz', port: 8080 }, initialDelaySeconds: 5, periodSeconds: 10 }
             { type: 'Liveness', httpGet: { path: '/healthz', port: 8080 }, initialDelaySeconds: 15, periodSeconds: 30 }

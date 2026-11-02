@@ -24,7 +24,10 @@ public sealed class Retriever(RagDbContext db, IEmbedder embedder, IOptions<RagO
     public async Task<IReadOnlyList<Passage>> RetrieveAsync(string question, CancellationToken ct)
     {
         using var activity = Instrumentation.Source.StartActivity("rag.retrieve");
-        var query = new Vector(await embedder.EmbedQueryAsync(question, ct));
+        activity?.SetTag("rag.retrieval.kind", "hybrid");
+        activity?.SetTag("rag.embedding.model", embedder.ModelId);
+
+        var query = new Vector(await EmbedQueryAsync(question, ct));
 
         var general = await HybridAsync(question, query, _o.TopK, faqOnly: false, ct);
         var pinned = Prompts.IsLicensingQuestion(question)
@@ -62,10 +65,61 @@ public sealed class Retriever(RagDbContext db, IEmbedder embedder, IOptions<RagO
             .Select(r => new Passage(r.Id, r.Source, r.Title, r.Url, r.Text, Math.Round(1 - r.Distance, 4)))
             .ToList();
 
+        var top = passages.Count > 0 ? passages.Max(p => p.Score) : 0;
         activity?.SetTag("rag.passages", passages.Count);
         activity?.SetTag("rag.pinned", pinned.Count);
-        activity?.SetTag("rag.top_score", passages.Count > 0 ? passages.Max(p => p.Score) : 0);
+        activity?.SetTag("rag.top_score", top);
+        Instrumentation.RetrievalTopScore.Record(top);
         return passages;
+    }
+
+    /// <summary>The embedding call as its own GenAI span: operation, provider and model, so a backend can cost it and time it apart from the chat call.</summary>
+    private async Task<float[]> EmbedQueryAsync(string question, CancellationToken ct)
+    {
+        var (provider, model) = ProviderAndModel(embedder.ModelId);
+        using var activity = Instrumentation.Source.StartActivity($"embeddings {model}");
+        activity?.SetTag(Instrumentation.GenAi.OperationName, "embeddings");
+        activity?.SetTag(Instrumentation.GenAi.ProviderName, provider);
+        activity?.SetTag(Instrumentation.GenAi.System, provider);
+        activity?.SetTag(Instrumentation.GenAi.RequestModel, model);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            return await embedder.EmbedQueryAsync(question, ct);
+        }
+        catch (Exception e)
+        {
+            activity?.SetTag(Instrumentation.GenAi.ErrorType, e.GetType().Name);
+            activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, e.Message);
+            throw;
+        }
+        finally
+        {
+            Instrumentation.GenAiOperationSeconds.Record(clock.Elapsed.TotalSeconds,
+                new KeyValuePair<string, object?>(Instrumentation.GenAi.OperationName, "embeddings"),
+                new KeyValuePair<string, object?>(Instrumentation.GenAi.ProviderName, provider),
+                new KeyValuePair<string, object?>(Instrumentation.GenAi.RequestModel, model));
+        }
+    }
+
+    /// <summary>"azure-openai/text-embedding-3-small" → ("azure.ai.openai", "text-embedding-3-small"); the ids are the embedders' own.</summary>
+    internal static (string Provider, string Model) ProviderAndModel(string embedderModelId)
+    {
+        var slash = embedderModelId.IndexOf('/');
+        if (slash < 0)
+        {
+            return ("cloudflare", embedderModelId); // Workers AI ids are "@cf/baai/bge-base-en-v1.5"-shaped only after the first slash; see below
+        }
+
+        var prefix = embedderModelId[..slash];
+        var rest = embedderModelId[(slash + 1)..];
+        return prefix switch
+        {
+            "azure-openai" => ("azure.ai.openai", rest),
+            "openai" => ("openai", rest),
+            "@cf" => ("cloudflare", embedderModelId),
+            _ => (prefix, rest),
+        };
     }
 
     private async Task<IReadOnlyList<string>> HybridAsync(string question, Vector query, int take, bool faqOnly, CancellationToken ct)

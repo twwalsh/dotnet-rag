@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Anthropic;
@@ -34,8 +35,15 @@ public sealed class Answerer(AnthropicClient client, IOptions<RagOptions> option
 
     public async Task<Answer> AnswerAsync(string question, IReadOnlyList<Passage> passages, CancellationToken ct)
     {
-        using var activity = Instrumentation.Source.StartActivity("rag.generate");
-        activity?.SetTag("gen_ai.request.model", _o.Model);
+        // The chat span, named and attributed per the OTel GenAI conventions: "{operation} {model}".
+        using var activity = Instrumentation.Source.StartActivity($"chat {_o.Model}");
+        activity?.SetTag(Instrumentation.GenAi.OperationName, "chat");
+        activity?.SetTag(Instrumentation.GenAi.ProviderName, "anthropic");
+        activity?.SetTag(Instrumentation.GenAi.System, "anthropic");
+        activity?.SetTag(Instrumentation.GenAi.RequestModel, _o.Model);
+        activity?.SetTag(Instrumentation.GenAi.RequestMaxTokens, _o.MaxAnswerTokens);
+        activity?.SetTag("rag.passages", passages.Count);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
 
         var parameters = new MessageCreateParams
         {
@@ -46,8 +54,23 @@ public sealed class Answerer(AnthropicClient client, IOptions<RagOptions> option
             Messages = [new UserMessageParam(UserMessage(question, passages))],
         };
 
-        var message = await client.Messages.Create(parameters, cancellationToken: ct);
+        Message message;
+        try
+        {
+            message = await client.Messages.Create(parameters, cancellationToken: ct);
+        }
+        catch (Exception e)
+        {
+            activity?.SetTag(Instrumentation.GenAi.ErrorType, e.GetType().Name);
+            activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, e.Message);
+            Instrumentation.GenAiOperationSeconds.Record(clock.Elapsed.TotalSeconds, ChatTags(e.GetType().Name));
+            throw;
+        }
+
         var stop = message.StopReason?.Raw();
+        activity?.SetTag(Instrumentation.GenAi.ResponseId, message.ID);
+        activity?.SetTag(Instrumentation.GenAi.ResponseModel, message.Model.Raw());
+        activity?.SetTag(Instrumentation.GenAi.FinishReasons, stop is null ? Array.Empty<string>() : new[] { stop });
         activity?.SetTag("gen_ai.response.finish_reason", stop);
         if (stop == "max_tokens")
         {
@@ -68,13 +91,41 @@ public sealed class Answerer(AnthropicClient client, IOptions<RagOptions> option
         var (text, form) = Answer.Fold(parts);
 
         var usage = message.Usage;
+        var cacheRead = usage.CacheReadInputTokens ?? 0;
         Instrumentation.InputTokens.Add(usage.InputTokens);
         Instrumentation.OutputTokens.Add(usage.OutputTokens);
-        activity?.SetTag("gen_ai.usage.input_tokens", usage.InputTokens);
-        activity?.SetTag("gen_ai.usage.output_tokens", usage.OutputTokens);
+        Instrumentation.CacheReadTokens.Add(cacheRead);
+        Instrumentation.GenAiTokenUsage.Record(usage.InputTokens, ChatTags(null, "input"));
+        Instrumentation.GenAiTokenUsage.Record(usage.OutputTokens, ChatTags(null, "output"));
+        Instrumentation.GenAiOperationSeconds.Record(clock.Elapsed.TotalSeconds, ChatTags(null));
+        activity?.SetTag(Instrumentation.GenAi.InputTokens, usage.InputTokens);
+        activity?.SetTag(Instrumentation.GenAi.OutputTokens, usage.OutputTokens);
+        activity?.SetTag(Instrumentation.GenAi.CacheReadInputTokens, cacheRead);
         activity?.SetTag("rag.form", form);
 
         return new Answer(text, form, usage.InputTokens, usage.OutputTokens, usage.CacheReadInputTokens ?? 0);
+    }
+
+    /// <summary>The metric attributes for the chat call; the token type and the error type are added when they apply.</summary>
+    private TagList ChatTags(string? errorType, string? tokenType = null)
+    {
+        var tags = new TagList
+        {
+            { Instrumentation.GenAi.OperationName, "chat" },
+            { Instrumentation.GenAi.ProviderName, "anthropic" },
+            { Instrumentation.GenAi.RequestModel, _o.Model },
+        };
+        if (tokenType is not null)
+        {
+            tags.Add(Instrumentation.GenAi.TokenType, tokenType);
+        }
+
+        if (errorType is not null)
+        {
+            tags.Add(Instrumentation.GenAi.ErrorType, errorType);
+        }
+
+        return tags;
     }
 
     private static string? FormOf(IReadOnlyDictionary<string, JsonElement> input) =>
