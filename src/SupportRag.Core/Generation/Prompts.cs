@@ -38,6 +38,21 @@ public static partial class Prompts
         Style: short. One short paragraph, or a few bullets for steps. American spelling. Plain markdown only: **bold**, bullet lists, and links written [text](https://fruitlessresearch.com/...) using only URLs that appear in the passages. Name controls exactly as the manual does, in capitals where it uses capitals. No greeting, no sign-off, no apology preamble.
         """;
 
+    /// <summary>
+    /// The same prompt for a model reached without tool calling: the one paragraph about show_form becomes the
+    /// Databricks build's "end your answer with a final line of exactly `FORM: &lt;name&gt;`", word for word
+    /// (databricks-rag/src/ask.py). Derived from <see cref="System"/> by two replacements so nothing else can differ;
+    /// a test checks both sentences are still there to be replaced.
+    /// </summary>
+    public static readonly string SystemTaggedForm = System
+        .Replace(ToolSentence, TaggedSentence, StringComparison.Ordinal)
+        .Replace(ToolRule, TaggedRule, StringComparison.Ordinal);
+
+    internal const string ToolSentence = "and you can put one in front of the visitor by calling the show_form tool after your answer:";
+    internal const string TaggedSentence = "and you can put one in front of the visitor by ending your answer with a final line of exactly `FORM: <name>`:";
+    internal const string ToolRule = "Call it only when that action is the next step for this visitor, at most once per answer, and still write the answer first. Do not describe the tool; just say \"use the form below\".";
+    internal const string TaggedRule = "Add that line only when that action is the next step for this visitor, at most once per answer, and still write the answer first. Do not describe the form mechanism; just say \"use the form below\".";
+
     [GeneratedRegex(
         @"\b(licen[cs]e|serial|key|activat|deactivat|unlock|demo|trial|expir|refund|bundle|purchase|bought|buy|paid|payment|receipt|invoice|computers?|machines?|transfer|resell|upgrade|update|email|reinstall|new (mac|pc|computer)|frlicense|unlicensed|not licensed|price|cost|tax|vat|free)\b",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

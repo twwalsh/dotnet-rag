@@ -11,13 +11,19 @@ using SupportRag.Core.Telemetry;
 namespace SupportRag.Core.Generation;
 
 /// <summary>
-/// One Messages call: the system prompt (cached), the show_form tool, and a user turn carrying the
+/// One Messages call to Claude: the system prompt (cached), the show_form tool, and a user turn carrying the
 /// passages and the question in the same &lt;passages&gt; markup the Worker sends, so the model sees the
 /// same thing from both builds.
 /// </summary>
-public sealed class Answerer(AnthropicClient client, IOptions<RagOptions> options)
+public sealed class ClaudeAnswerer(AnthropicClient client, IOptions<RagOptions> options) : IAnswerer
 {
+    private const string ProviderName = "anthropic";
+
     private readonly RagOptions _o = options.Value;
+
+    public string ModelId => _o.Model;
+
+    public string Provider => ProviderName;
 
     private static readonly Tool ShowForm = new()
     {
@@ -38,8 +44,8 @@ public sealed class Answerer(AnthropicClient client, IOptions<RagOptions> option
         // The chat span, named and attributed per the OTel GenAI conventions: "{operation} {model}".
         using var activity = Instrumentation.Source.StartActivity($"chat {_o.Model}", ActivityKind.Client); // GenAI conventions: inference calls are CLIENT spans
         activity?.SetTag(Instrumentation.GenAi.OperationName, "chat");
-        activity?.SetTag(Instrumentation.GenAi.ProviderName, "anthropic");
-        activity?.SetTag(Instrumentation.GenAi.System, "anthropic");
+        activity?.SetTag(Instrumentation.GenAi.ProviderName, ProviderName);
+        activity?.SetTag(Instrumentation.GenAi.System, ProviderName);
         activity?.SetTag(Instrumentation.GenAi.RequestModel, _o.Model);
         activity?.SetTag(Instrumentation.GenAi.RequestMaxTokens, _o.MaxAnswerTokens);
         activity?.SetTag("rag.passages", passages.Count);
@@ -63,7 +69,7 @@ public sealed class Answerer(AnthropicClient client, IOptions<RagOptions> option
         {
             activity?.SetTag(Instrumentation.GenAi.ErrorType, e.GetType().Name);
             activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, e.Message);
-            Instrumentation.GenAiOperationSeconds.Record(clock.Elapsed.TotalSeconds, ChatTags(e.GetType().Name));
+            Instrumentation.GenAiOperationSeconds.Record(clock.Elapsed.TotalSeconds, Instrumentation.ChatTags(ProviderName, _o.Model, e.GetType().Name));
             throw;
         }
 
@@ -92,40 +98,20 @@ public sealed class Answerer(AnthropicClient client, IOptions<RagOptions> option
 
         var usage = message.Usage;
         var cacheRead = usage.CacheReadInputTokens ?? 0;
+        var cacheWrite = usage.CacheCreationInputTokens ?? 0;
         Instrumentation.InputTokens.Add(usage.InputTokens);
         Instrumentation.OutputTokens.Add(usage.OutputTokens);
         Instrumentation.CacheReadTokens.Add(cacheRead);
-        Instrumentation.GenAiTokenUsage.Record(usage.InputTokens, ChatTags(null, "input"));
-        Instrumentation.GenAiTokenUsage.Record(usage.OutputTokens, ChatTags(null, "output"));
-        Instrumentation.GenAiOperationSeconds.Record(clock.Elapsed.TotalSeconds, ChatTags(null));
+        Instrumentation.GenAiTokenUsage.Record(usage.InputTokens, Instrumentation.ChatTags(ProviderName, _o.Model, null, "input"));
+        Instrumentation.GenAiTokenUsage.Record(usage.OutputTokens, Instrumentation.ChatTags(ProviderName, _o.Model, null, "output"));
+        Instrumentation.GenAiOperationSeconds.Record(clock.Elapsed.TotalSeconds, Instrumentation.ChatTags(ProviderName, _o.Model, null));
         activity?.SetTag(Instrumentation.GenAi.InputTokens, usage.InputTokens);
         activity?.SetTag(Instrumentation.GenAi.OutputTokens, usage.OutputTokens);
         activity?.SetTag(Instrumentation.GenAi.CacheReadInputTokens, cacheRead);
+        activity?.SetTag(Instrumentation.GenAi.CacheCreationInputTokens, cacheWrite);
         activity?.SetTag("rag.form", form);
 
-        return new Answer(text, form, usage.InputTokens, usage.OutputTokens, usage.CacheReadInputTokens ?? 0);
-    }
-
-    /// <summary>The metric attributes for the chat call; the token type and the error type are added when they apply.</summary>
-    private TagList ChatTags(string? errorType, string? tokenType = null)
-    {
-        var tags = new TagList
-        {
-            { Instrumentation.GenAi.OperationName, "chat" },
-            { Instrumentation.GenAi.ProviderName, "anthropic" },
-            { Instrumentation.GenAi.RequestModel, _o.Model },
-        };
-        if (tokenType is not null)
-        {
-            tags.Add(Instrumentation.GenAi.TokenType, tokenType);
-        }
-
-        if (errorType is not null)
-        {
-            tags.Add(Instrumentation.GenAi.ErrorType, errorType);
-        }
-
-        return tags;
+        return new Answer(text, form, usage.InputTokens, usage.OutputTokens, cacheRead, cacheWrite);
     }
 
     private static string? FormOf(IReadOnlyDictionary<string, JsonElement> input) =>

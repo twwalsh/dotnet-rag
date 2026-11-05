@@ -22,7 +22,7 @@ production assistant; that stays on Cloudflare, where the site runs.
 | Embeddings | Workers AI `bge-base-en-v1.5` (768-d) | Databricks-managed `gte-large-en` (1024-d) | **`text-embedding-3-small`** (1536-d) via Azure OpenAI in Azure or OpenAI directly elsewhere; or Workers AI bge-base, by configuration |
 | Index / search | Vectorize, vector only | Vector Search Delta Sync, hybrid | **pgvector cosine + Postgres `tsvector`, fused by reciprocal rank** |
 | Licensing pin | top 3 FAQ entries on a licensing-shaped question | identical, by filter | identical, by `source = 'faq'` |
-| Generation | Claude Haiku via AI Gateway, streamed; `show_form` tool | Llama 3.3 70B via a Unity Gateway service; tagged last line | **Claude Haiku via the official C# SDK; `show_form` tool, prompt caching** |
+| Generation | Claude Haiku via AI Gateway, streamed; `show_form` tool | Llama 3.3 70B via a Unity Gateway service; tagged last line | **Claude Haiku via the official C# SDK; `show_form` tool, prompt caching. Or, by configuration, an open-weight model on Workers AI through its OpenAI-compatible endpoint, the form as a tagged last line (see [the cost decision](#the-cost-decision-one-evaluation-set-seven-generators))** |
 | Ingest | script, run by hand | serverless job (DAB) | **a `BackgroundService`, nightly and on an empty table; idempotent by content hash and embedding model** |
 | Evaluation | `support-eval.mjs` | MLflow GenAI scorers | **`SupportRag.Eval`, in-process, same rules, exit code gate** |
 | Telemetry | AI Gateway logs | inference table + MLflow traces | **OpenTelemetry traces, metrics and logs → OTLP, with the GenAI semantic conventions on the agent, embedding and chat spans; running under [Dynatrace](dynatrace/README.md)** |
@@ -38,12 +38,14 @@ src/SupportRag.Core/           the pipeline, host-agnostic
   Data/                          Chunk + RagDbContext (pgvector column, generated tsvector, GIN index)
   Embeddings/                    IEmbedder; Azure OpenAI through Microsoft.Extensions.AI; Workers AI over REST
   Retrieval/                     Retriever (hybrid + licensing pin), ReciprocalRankFusion
-  Generation/                    Prompts (the site's prompt, verbatim), Answerer (one Messages call), Answer.Fold
+  Generation/                    Prompts (the site's prompt, verbatim, and its tagged-form variant), IAnswerer, ClaudeAnswerer (one
+                                 Messages call), OpenAiCompatibleAnswerer (Workers AI, or any server speaking that protocol), Answer
   Ingest/                        IngestPlan (the diff, pure), CorpusIngestor, NightlyIngestService
   Pipeline/SupportAssistant.cs   retrieve → refuse on empty → answer → sources
   Telemetry/Instrumentation.cs   one ActivitySource, one Meter, the gen_ai.* attribute names
 src/SupportRag.Api/            minimal API: POST /ask, POST /admin/ingest, GET /healthz; rate limiting; OpenTelemetry
 src/SupportRag.Eval/           the eval runner (and --ingest for a fresh database)
+eval/generators/*.json         one eval run per generator; eval/prices.json the list prices; eval/cost.py the comparison (make compare)
 tests/SupportRag.Tests/        xunit: the pure parts
 infra/main.bicep               Container Apps + Azure OpenAI + Postgres Flexible Server, declared (+ the OTLP endpoint and token)
 dynatrace/README.md            the assistant under Dynatrace: wiring, trace shape, DQL for a dashboard, one alert
@@ -63,6 +65,8 @@ make db                                   # createdb + CREATE EXTENSION vector
 op run --env-file=.env.op -- make run     # migrates, ingests on first boot, serves on :5080
 make ask Q="Where do I put the .frlicense file on a Mac?"
 op run --env-file=.env.op -- make eval    # 30 cases; exit 1 below 80 % strict
+make eval-model MODEL=@cf/meta/llama-3.1-8b-instruct-fp8-fast   # the same cases through a Workers AI model (CLOUDFLARE_API_TOKEN)
+make compare                                                      # every run in eval/generators, scored and priced
 dotnet test
 ```
 
@@ -78,7 +82,7 @@ Postgres 18 with pgvector 0.8.6 (`eval/latest.json` holds every answer with its 
 | right self-service form offered | 30/30 | 30/30 | 30/30 |
 | **strict pass (all rules of a case)** | **30/30** | **29/30** | **29/30** |
 
-Mean 2.2 s per question; 55.6k input tokens for the 30 (34.5k of them served from the prompt cache), 8.9k out.
+Mean 2.2 s per question; 55.6k uncached input tokens for the 30, another 34.5k read from the prompt cache, 8.9k out.
 
 **The first run was 28/30, and the two misses were the same bug.** Both answers stopped at exactly 700
 output tokens, the cap the Worker uses. Claude 5 models think adaptively by default, the thinking counts
@@ -88,6 +92,57 @@ response's stop reason is a span tag and a `rag.truncations` counter, and a re-r
 700 with the same model, is exposed to the same failure on a long think; that finding goes back to it.
 
 Idempotency, measured: the second `--ingest` on the same file reported `219 unchanged, 0 embedded` in 0.1 s.
+
+## The cost decision: one evaluation set, seven generators
+
+The question, as a hiring manager would put it: would moving this workload from a hosted frontier model to a
+smaller open-weight one save money, and what would it cost in quality? Workers AI serves open-weight models behind
+an OpenAI-compatible endpoint, so the generator became a configuration value (`Rag:Generator`, behind `IAnswerer`)
+and the same 30 cases ran through Claude Haiku 5.5 and six open-weight models on 2026-11-04, from the same laptop,
+against the same index, one run each. The tokens are what each provider's response reported. The dollars are those
+tokens at the list prices in `eval/prices.json`, copied the same day, so they are computed, not billed. The table is
+`make compare`; every answer is in `eval/generators/`.
+
+| model | strict | must | must-not | form | forms unasked (of 26) | input tok | cache reads | output tok | s/question | $ per run | $ per 1,000 questions |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| claude-haiku-5-5 | **30/30** | 30/30 | 30/30 | 30/30 | **2** | 55,568 | 33,321 | 8,199 | 1.89 | $0.0101 | $0.34 |
+| @cf/meta/llama-3.1-8b-instruct-fp8-fast | **30/30** | 30/30 | 30/30 | 30/30 | **17** | 54,317 | 0 | 1,607 | 0.68 | $0.0031 | $0.10 |
+| @cf/qwen/qwen3-30b-a3b-fp8 | **29/30** | 29/30 | 30/30 | 30/30 | **12** | 54,163 | 0 | 7,461 | 2.53 | $0.0053 | $0.18 |
+| @cf/meta/llama-3.3-70b-instruct-fp8-fast | **29/30** | 29/30 | 30/30 | 30/30 | **16** | 54,317 | 0 | 1,431 | 1.63 | $0.0191 | $0.64 |
+| @cf/google/gemma-4-26b-a4b-it | **27/30** | 27/30 | 30/30 | 29/30 | **0** | 55,790 | 0 | 33,409 | 22.75 | $0.0156 | $0.52 |
+| @cf/openai/gpt-oss-20b | **27/30** | 27/30 | 30/30 | 30/30 | **2** | 55,517 | 0 | 5,985 | 2.86 | $0.0129 | $0.43 |
+| @cf/openai/gpt-oss-120b | **26/30** | 28/30 | 29/30 | 29/30 | **3** | 55,337 | 0 | 6,994 | 3.50 | $0.0246 | $0.82 |
+
+What it says:
+
+- **The scorers alone would pick the wrong model.** Llama 3.1 8B passes all 30 cases in 0.7 s at $0.10 per thousand
+  questions, under a third of Haiku's $0.34. It also put a self-service form under 17 of the 26 answers that call for
+  none ("Why was tax added at checkout?" came with the resend-license form). The rules check the form only on the four
+  cases that expect one, so none of that fails a case. Haiku did it twice. A form under most answers teaches visitors to
+  ignore the forms, which is the one thing the forms are for.
+- **Haiku's cost is its output.** It wrote 8.2k output tokens for the 30 (a median of 259 a question, thinking
+  included) to the 8B's 1.6k (median 51), and output is five times the price of input. The prompt cache takes the
+  1,149-token system prompt from $0.10 to $0.01 per million on every question after the first; without it the run
+  would be about $0.44 per thousand.
+- **Some of the misses are the scorers'.** `**not** expire` fails a pattern written for `does not expire`; a
+  typographic apostrophe in `can’t` fails `/can't/`; `**FR** mark` fails `/FR mark/`; "there's no need to deactivate"
+  trips a must-not written for the opposite advice. They count as misses here, as the other two builds count their
+  own, and they are the case for a validated LLM-judge scorer the set does not yet have. The genuine misses: gpt-oss
+  120B dropped the complete-bundle form once and wrote a literal `FORM: None` under an answer; the 70B and Qwen each
+  phrased one correct answer in words the pattern did not allow; and Gemma 4 26B, the one open-weight model that
+  offered no unasked form, thinks at length: 33k output tokens for the 30, 23 s a question, and 3 answers were
+  empty because the thinking spent the whole 2,000-token cap, the failure the 700-token cap produced for Haiku on
+  2026-10-30, two models later.
+- **Decision: the frontier model stays.** The saving is $0.24 per thousand questions; the behavior change is a form
+  under two answers in three. The eval gains the unasked-form count now and should gain it as a rule in all three
+  builds, and the question is worth asking again once that rule exists and one prompt line has been tried against it,
+  which is an afternoon's experiment and not a migration.
+
+Limits, stated: 30 cases and one run per model, so a one-case difference between rows is noise; list prices, not an
+invoice; the open-weight models were reached without tool calling, because on this prompt every one of them returned
+the tool call and no text, so their prompt differs from Claude's by one paragraph (`Prompts.SystemTaggedForm`, the
+Databricks build's wording); Workers AI is serverless GPU billed per token, so this says what a smaller hosted
+open-weight model costs and nothing about running weights on one's own hardware.
 
 ## Design notes
 
@@ -108,6 +163,10 @@ Idempotency, measured: the second `--ingest` on the same file reported `219 unch
 - **The provider boundary is the embedding, not the model.** `IEmbedder` makes the one asymmetry explicit
   (bge wants a query prefix, OpenAI models do not), and swapping Azure OpenAI for Workers AI is a config
   value, which is how the retrieval comparison with the live site is made like for like.
+- **A scorer is blind to what it does not score.** The shared rules check the self-service form only on the four
+  cases that expect one, so a model can pass all 30 while putting a form under most answers, and one did (below).
+  The runner now reports "forms offered unasked" beside the score. It is not yet a rule, because the three builds
+  score by the same rules and a rule change is a three-build change; until then it is the number to read with the score.
 - **Secrets never touch the repo.** Locally they come from 1Password at run time (`op run`); in Azure the
   Anthropic key is a Container Apps secret and the embedding call uses the app's managed identity.
 
@@ -126,8 +185,8 @@ shape as the Databricks demo's door). `infra/main.bicep`, deployed twice as its 
   "Provisioning is restricted in this region" for East US and `SkuNotAvailable` for East US 2 while the SKU
   listing advertises both. The region is a parameter for that reason. A failed create also keeps the server
   name reserved for a while, hence the unique suffix.
-- **Scored over HTTP** with `SupportRag.Eval --api <url>`: **30/30 strict**, 2.2 s a question, 47.9k input tokens
-  (34.5k from the prompt cache). The eval runner now waits out the app's own per-IP rate limit, which it tripped
+- **Scored over HTTP** with `SupportRag.Eval --api <url>`: **30/30 strict**, 2.2 s a question, 47.9k uncached input tokens
+  plus 34.5k from the prompt cache. The eval runner now waits out the app's own per-IP rate limit, which it tripped
   at question 21, as a client should.
 
 Secrets: the Anthropic key and the admin key are Container Apps secrets; the Postgres password lives in

@@ -16,7 +16,10 @@ public sealed class RagOptions
     [Required]
     public string ChunksPath { get; set; } = "data/chunks.jsonl";
 
-    /// <summary>The generator. The Cloudflare build uses the same model, so answers are comparable.</summary>
+    /// <summary>Which generator answers: Claude through the official SDK, or an open-weight model on Workers AI through its OpenAI-compatible endpoint.</summary>
+    public GeneratorKind Generator { get; set; } = GeneratorKind.Anthropic;
+
+    /// <summary>The Claude model, when the generator is Anthropic. The Cloudflare build uses the same one, so answers are comparable.</summary>
     [Required]
     public string Model { get; set; } = "claude-haiku-5-5";
 
@@ -69,6 +72,15 @@ public sealed class RagOptions
     public bool IngestOnStartupIfEmpty { get; set; } = true;
 }
 
+public enum GeneratorKind
+{
+    /// <summary>Claude (<see cref="RagOptions.Model"/>) through the official C# SDK: the show_form tool, prompt caching. ANTHROPIC_API_KEY.</summary>
+    Anthropic,
+
+    /// <summary>An open-weight model on Cloudflare Workers AI (<see cref="WorkersAiOptions.ChatModel"/>) through the OpenAI-compatible chat endpoint; the form is a tagged last line. CLOUDFLARE_API_TOKEN.</summary>
+    WorkersAi,
+}
+
 public enum EmbedderKind
 {
     /// <summary>Azure OpenAI embeddings (text-embedding-3-small by default). The production choice for the Azure deployment.</summary>
@@ -94,10 +106,14 @@ public sealed class AzureOpenAIOptions
 
 public sealed class WorkersAiOptions
 {
-    /// <summary>The Cloudflare account id — required when Embedder is WorkersAi. The token comes from CLOUDFLARE_API_TOKEN.</summary>
+    /// <summary>The Cloudflare account id — required when the embedder or the generator is WorkersAi. The token comes from CLOUDFLARE_API_TOKEN.</summary>
     public string? AccountId { get; set; }
 
+    /// <summary>The embedding model.</summary>
     public string Model { get; set; } = "@cf/baai/bge-base-en-v1.5";
+
+    /// <summary>The chat model, when the generator is WorkersAi. Any text model the catalog lists; the cheapest Llama is the default.</summary>
+    public string ChatModel { get; set; } = "@cf/meta/llama-3.1-8b-instruct-fp8-fast";
 }
 
 public sealed class OpenAIOptions

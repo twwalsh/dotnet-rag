@@ -13,4 +13,5 @@ public sealed record AskResult(
 
 public sealed record SourceLink(string Title, string Url);
 
-public sealed record Usage(long InputTokens, long OutputTokens, long CacheReadTokens, double Seconds);
+/// <summary>The model call's token counts and the end-to-end time. Cache reads and writes are zero for a provider without a prompt cache.</summary>
+public sealed record Usage(long InputTokens, long OutputTokens, long CacheReadTokens, long CacheWriteTokens, double Seconds);

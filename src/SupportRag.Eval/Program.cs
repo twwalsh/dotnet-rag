@@ -4,6 +4,8 @@
 //   dotnet run --project src/SupportRag.Eval -- --json eval/latest.json --min 0.8
 //   dotnet run --project src/SupportRag.Eval -- --ingest             # migrate + ingest first (CI, a fresh database)
 //   dotnet run --project src/SupportRag.Eval -- --api https://<host>  # score a DEPLOYED instance over HTTP instead of in-process
+//   Rag__Generator=WorkersAi Rag__WorkersAi__ChatModel=@cf/... dotnet run --project src/SupportRag.Eval -- --json eval/generators/<name>.json
+//                                                            # the same cases through another generator (see eval/cost.py)
 //
 // The cases are data/eval.jsonl, copied verbatim from the Cloudflare build: a question, `must` regexes
 // the answer has to match, `mustNot` ones it must not, and sometimes the self-service `form` it has to
@@ -20,6 +22,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.EntityFrameworkCore;
 using SupportRag.Core;
 using SupportRag.Core.Data;
+using SupportRag.Core.Generation;
 using SupportRag.Core.Ingest;
 using SupportRag.Core.Pipeline;
 
@@ -73,7 +76,7 @@ foreach (var c in cases)
         problems.Add($"form: wanted {c.Form}, got {r.Form ?? "none"}");
     }
 
-    results.Add(new CaseResult(c.Q, r.Answer, r.Form, r.Sources.Select(s => s.Title).ToList(), r.Passages.Select(p => p.Title).ToList(), problems, r.Usage));
+    results.Add(new CaseResult(c.Q, r.Answer, r.Form, r.Model, r.Sources.Select(s => s.Title).ToList(), r.Passages.Select(p => p.Title).ToList(), problems, r.Usage));
     Console.Write(problems.Count == 0 ? "." : "F");
 }
 
@@ -83,12 +86,20 @@ var mustNot = results.Count(r => !r.Problems.Any(p => p.StartsWith("said", Strin
 var forms = results.Count(r => !r.Problems.Any(p => p.StartsWith("form", StringComparison.Ordinal)));
 var strict = results.Count(r => r.Problems.Count == 0);
 var n = results.Count;
+
+// A form offered where the case expects none. The three builds' shared rules only check the form on the cases
+// that call for one, so this cannot fail a case; it is reported beside the score because a generator can pass
+// every rule while putting a form under most answers (seen 2026-11-04 with the open-weight models: 16 and 17 of
+// 26 such cases, against Claude's 1). Until the shared eval adopts the rule, this is the number to read with the score.
+var noFormCases = cases.Where(c => c.Form is null).Select(c => c.Q).ToHashSet(StringComparer.Ordinal);
+var unaskedForms = results.Count(r => r.Form is not null && noFormCases.Contains(r.Question));
 Console.WriteLine($"""
     must-say rules met          {must}/{n}
     must-not-say rules met      {mustNot}/{n}
     right form offered          {forms}/{n}
     strict pass                 {strict}/{n}
-    tokens in/out               {results.Sum(r => r.Usage.InputTokens)}/{results.Sum(r => r.Usage.OutputTokens)}  (cache reads {results.Sum(r => r.Usage.CacheReadTokens)})
+    forms offered unasked       {unaskedForms}/{noFormCases.Count}  (not scored; see the note in this file)
+    tokens in/out               {results.Sum(r => r.Usage.InputTokens)}/{results.Sum(r => r.Usage.OutputTokens)}  (cache reads {results.Sum(r => r.Usage.CacheReadTokens)}, cache writes {results.Sum(r => r.Usage.CacheWriteTokens)})
     mean seconds per question   {results.Average(r => r.Usage.Seconds):F2}
     """);
 foreach (var r in results.Where(r => r.Problems.Count > 0))
@@ -96,10 +107,16 @@ foreach (var r in results.Where(r => r.Problems.Count > 0))
     Console.WriteLine($"\nFAIL  {r.Question}\n      {string.Join("; ", r.Problems)}\n      form={r.Form ?? "none"} answer: {r.Answer.ReplaceLineEndings(" ")[..Math.Min(300, r.Answer.Length)]}");
 }
 
+// Which generator answered: in-process it is the configured one; over HTTP it is whatever the instance reported.
+var answerer = apiBase is null ? app.Services.GetRequiredService<IAnswerer>() : null;
+var model = answerer?.ModelId ?? results.Select(r => r.Model).FirstOrDefault(m => m is not null);
+var provider = answerer?.Provider;
+Console.WriteLine($"    model                       {model ?? "?"}{(provider is null ? "" : $" ({provider})")}");
+
 if (jsonOut is not null)
 {
     Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(jsonOut))!);
-    await File.WriteAllTextAsync(jsonOut, JsonSerializer.Serialize(new { ranAt = DateTimeOffset.UtcNow, strict, n, must, mustNot, forms, results }, EvalJson.Options));
+    await File.WriteAllTextAsync(jsonOut, JsonSerializer.Serialize(new { ranAt = DateTimeOffset.UtcNow, model, provider, strict, n, must, mustNot, forms, unaskedForms, noFormCases = noFormCases.Count, results }, EvalJson.Options));
 }
 
 var rate = (double)strict / n;
@@ -151,7 +168,7 @@ internal sealed record ApiAnswer(string Answer, string? Form, List<SourceLink> S
 
 internal sealed record ApiPassage(string Id, string Title, string Url, double Score);
 
-internal sealed record CaseResult(string Question, string Answer, string? Form, List<string> Sources, List<string> Passages, List<string> Problems, Usage Usage);
+internal sealed record CaseResult(string Question, string Answer, string? Form, string? Model, List<string> Sources, List<string> Passages, List<string> Problems, Usage Usage);
 
 internal static class EvalJson
 {

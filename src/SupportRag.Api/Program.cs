@@ -10,6 +10,7 @@ using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using SupportRag.Core;
 using SupportRag.Core.Data;
+using SupportRag.Core.Generation;
 using SupportRag.Core.Ingest;
 using SupportRag.Core.Options;
 using SupportRag.Core.Pipeline;
@@ -89,11 +90,12 @@ if (app.Environment.IsDevelopment())
 
 app.MapHealthChecks("/healthz");
 
-app.MapGet("/", (IOptions<RagOptions> o) => Results.Ok(new
+app.MapGet("/", (IOptions<RagOptions> o, IAnswerer answerer) => Results.Ok(new
 {
     name = "support-rag",
     description = "The fruitlessresearch.com support assistant, rebuilt on ASP.NET Core + Postgres/pgvector. POST /ask {\"question\": \"...\"}",
-    model = o.Value.Model,
+    generator = o.Value.Generator.ToString(),
+    model = answerer.ModelId,
     embedder = o.Value.Embedder.ToString(),
     source = "https://github.com/twwalsh/dotnet-rag",
 }));

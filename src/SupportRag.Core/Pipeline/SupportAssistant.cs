@@ -8,7 +8,7 @@ using SupportRag.Core.Telemetry;
 namespace SupportRag.Core.Pipeline;
 
 /// <summary>Retrieve, then answer only from what was retrieved. The same two steps as ask.py and support.ts.</summary>
-public sealed class SupportAssistant(Retriever retriever, Answerer answerer, IOptions<RagOptions> options)
+public sealed class SupportAssistant(Retriever retriever, IAnswerer answerer, IOptions<RagOptions> options)
 {
     public const string AgentName = "support-assistant";
 
@@ -20,7 +20,7 @@ public sealed class SupportAssistant(Retriever retriever, Answerer answerer, IOp
         using var activity = Instrumentation.Source.StartActivity($"invoke_agent {AgentName}");
         activity?.SetTag(Instrumentation.GenAi.OperationName, "invoke_agent");
         activity?.SetTag(Instrumentation.GenAi.AgentName, AgentName);
-        activity?.SetTag(Instrumentation.GenAi.RequestModel, _o.Model);
+        activity?.SetTag(Instrumentation.GenAi.RequestModel, answerer.ModelId);
         activity?.SetTag("rag.question.chars", question.Length);
         var clock = Stopwatch.StartNew();
         Instrumentation.Questions.Add(1);
@@ -37,7 +37,7 @@ public sealed class SupportAssistant(Retriever retriever, Answerer answerer, IOp
             activity?.SetTag("rag.refused", true);
             activity?.SetTag("rag.outcome", "refused");
             Instrumentation.AnswerSeconds.Record(clock.Elapsed.TotalSeconds, new KeyValuePair<string, object?>("rag.outcome", "refused"));
-            return new AskResult(question, Prompts.Nothing, null, null, [], [], new Usage(0, 0, 0, clock.Elapsed.TotalSeconds));
+            return new AskResult(question, Prompts.Nothing, null, null, [], [], new Usage(0, 0, 0, 0, clock.Elapsed.TotalSeconds));
         }
 
         activity?.SetTag("rag.refused", false);
@@ -62,8 +62,8 @@ public sealed class SupportAssistant(Retriever retriever, Answerer answerer, IOp
         activity?.SetTag("rag.form", answer.Form);
 
         Instrumentation.AnswerSeconds.Record(clock.Elapsed.TotalSeconds, new KeyValuePair<string, object?>("rag.outcome", outcome));
-        return new AskResult(question, answer.Text, answer.Form, _o.Model, passages, sources,
-            new Usage(answer.InputTokens, answer.OutputTokens, answer.CacheReadTokens, clock.Elapsed.TotalSeconds));
+        return new AskResult(question, answer.Text, answer.Form, answerer.ModelId, passages, sources,
+            new Usage(answer.InputTokens, answer.OutputTokens, answer.CacheReadTokens, answer.CacheWriteTokens, clock.Elapsed.TotalSeconds));
     }
 
     /// <summary>"Manual > Trammel > SLOW attack" reads better under an answer as "Trammel > SLOW attack".</summary>

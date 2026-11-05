@@ -1,0 +1,13 @@
+{
+  "_comment": "List prices per million tokens, copied from the providers' pricing pages on asOf. eval/cost.py multiplies them by the token counts the eval measured; the dollars are therefore computed, not billed.",
+  "asOf": "2026-11-04",
+  "models": {
+    "claude-haiku-5-5": { "input": 0.10, "output": 0.50, "cacheRead": 0.01, "cacheWrite": 0.125, "note": "prompts up to 100K tokens; cacheWrite is the 5-minute price", "source": "https://platform.claude.com/docs/en/about-claude/pricing" },
+    "@cf/meta/llama-3.1-8b-instruct-fp8-fast": { "input": 0.045, "output": 0.384, "source": "https://developers.cloudflare.com/workers-ai/platform/pricing/" },
+    "@cf/meta/llama-3.3-70b-instruct-fp8-fast": { "input": 0.293, "output": 2.253, "source": "https://developers.cloudflare.com/workers-ai/platform/pricing/" },
+    "@cf/qwen/qwen3-30b-a3b-fp8": { "input": 0.051, "output": 0.335, "source": "https://developers.cloudflare.com/workers-ai/platform/pricing/" },
+    "@cf/openai/gpt-oss-20b": { "input": 0.20, "output": 0.30, "source": "https://developers.cloudflare.com/workers-ai/platform/pricing/" },
+    "@cf/openai/gpt-oss-120b": { "input": 0.35, "output": 0.75, "source": "https://developers.cloudflare.com/workers-ai/platform/pricing/" },
+    "@cf/google/gemma-4-26b-a4b-it": { "input": 0.10, "output": 0.30, "source": "https://developers.cloudflare.com/workers-ai/platform/pricing/" }
+  }
+}

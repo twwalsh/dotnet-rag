@@ -33,6 +33,28 @@ public static class Instrumentation
     /// <summary>OTel GenAI client metric: wall time of one model or embedding call.</summary>
     public static readonly Histogram<double> GenAiOperationSeconds = Meter.CreateHistogram<double>("gen_ai.client.operation.duration", unit: "s", description: "GenAI operation duration");
 
+    /// <summary>The metric attributes for a chat call; the token type and the error type are added when they apply.</summary>
+    public static TagList ChatTags(string provider, string model, string? errorType, string? tokenType = null)
+    {
+        var tags = new TagList
+        {
+            { GenAi.OperationName, "chat" },
+            { GenAi.ProviderName, provider },
+            { GenAi.RequestModel, model },
+        };
+        if (tokenType is not null)
+        {
+            tags.Add(GenAi.TokenType, tokenType);
+        }
+
+        if (errorType is not null)
+        {
+            tags.Add(GenAi.ErrorType, errorType);
+        }
+
+        return tags;
+    }
+
     /// <summary>The attribute set the GenAI conventions put on spans and metrics; one place so the names cannot drift.</summary>
     public static class GenAi
     {
@@ -47,6 +69,7 @@ public static class Instrumentation
         public const string InputTokens = "gen_ai.usage.input_tokens";
         public const string OutputTokens = "gen_ai.usage.output_tokens";
         public const string CacheReadInputTokens = "gen_ai.usage.cache_read.input_tokens";
+        public const string CacheCreationInputTokens = "gen_ai.usage.cache_creation.input_tokens";
         public const string TokenType = "gen_ai.token.type";
         public const string AgentName = "gen_ai.agent.name";
         public const string ErrorType = "error.type";

@@ -30,6 +30,7 @@ public static class ServiceCollectionExtensions
             .ValidateDataAnnotations()
             .Validate(o => o.Embedder != EmbedderKind.AzureOpenAI || !string.IsNullOrWhiteSpace(o.AzureOpenAI.Endpoint), "Rag:AzureOpenAI:Endpoint is required for the AzureOpenAI embedder")
             .Validate(o => o.Embedder != EmbedderKind.WorkersAi || !string.IsNullOrWhiteSpace(o.WorkersAi.AccountId), "Rag:WorkersAi:AccountId is required for the WorkersAi embedder")
+            .Validate(o => o.Generator != GeneratorKind.WorkersAi || !string.IsNullOrWhiteSpace(o.WorkersAi.AccountId), "Rag:WorkersAi:AccountId is required for the WorkersAi generator")
             .ValidateOnStart();
 
         // One NpgsqlDataSource for the process, with the pgvector type handler; EF Core and the health check share it.
@@ -42,11 +43,22 @@ public static class ServiceCollectionExtensions
         });
         services.AddDbContext<RagDbContext>((sp, o) => o.UseNpgsql(sp.GetRequiredService<NpgsqlDataSource>(), npgsql => npgsql.UseVector()));
 
+        // One named client for everything Workers AI: embeddings and, when configured, generation.
+        services.AddHttpClient("workers-ai", (sp, http) =>
+        {
+            http.BaseAddress = new Uri("https://api.cloudflare.com/client/v4/");
+            var token = configuration["CLOUDFLARE_API_TOKEN"];
+            if (!string.IsNullOrEmpty(token))
+            {
+                http.DefaultRequestHeaders.Authorization = new("Bearer", token);
+            }
+        });
+
         services.AddSingleton<AnthropicClient>(_ => new AnthropicClient()); // ANTHROPIC_API_KEY from the environment
         services.AddEmbedder(configuration);
+        services.AddAnswerer();
 
         services.AddScoped<Retriever>();
-        services.AddSingleton<Answerer>();
         services.AddScoped<SupportAssistant>();
         services.AddScoped<CorpusIngestor>();
         services.TryAddSingleton(TimeProvider.System);
@@ -59,18 +71,27 @@ public static class ServiceCollectionExtensions
         return services;
     }
 
-    private static void AddEmbedder(this IServiceCollection services, IConfiguration configuration)
+    /// <summary>The generator is a configuration value, like the embedder: Claude by default, an open-weight model on Workers AI by choice.</summary>
+    private static void AddAnswerer(this IServiceCollection services)
     {
-        services.AddHttpClient("workers-ai", (sp, http) =>
+        services.AddSingleton<IAnswerer>(sp =>
         {
-            http.BaseAddress = new Uri("https://api.cloudflare.com/client/v4/");
-            var token = configuration["CLOUDFLARE_API_TOKEN"];
-            if (!string.IsNullOrEmpty(token))
+            var o = sp.GetRequiredService<IOptions<RagOptions>>().Value;
+            switch (o.Generator)
             {
-                http.DefaultRequestHeaders.Authorization = new("Bearer", token);
+                case GeneratorKind.WorkersAi:
+                    var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient("workers-ai");
+                    var completions = new Uri($"accounts/{o.WorkersAi.AccountId}/ai/v1/chat/completions", UriKind.Relative);
+                    return new OpenAiCompatibleAnswerer(http, completions, o.WorkersAi.ChatModel, "cloudflare.workers_ai", o.MaxAnswerTokens);
+                case GeneratorKind.Anthropic:
+                default:
+                    return new ClaudeAnswerer(sp.GetRequiredService<AnthropicClient>(), sp.GetRequiredService<IOptions<RagOptions>>());
             }
         });
+    }
 
+    private static void AddEmbedder(this IServiceCollection services, IConfiguration configuration)
+    {
         services.AddSingleton<IEmbedder>(sp =>
         {
             var o = sp.GetRequiredService<IOptions<RagOptions>>().Value;

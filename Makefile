@@ -5,7 +5,7 @@ PG      = /Applications/Postgres.app/Contents/Versions/latest/bin
 DB     ?= support_rag
 API    ?= http://localhost:5080
 
-.PHONY: export db run ingest ask eval test migrate
+.PHONY: export db run ingest ask eval eval-model compare test migrate
 
 ## 1. chunk the public sources with the Cloudflare build's own chunker (same chunks, same allowlist)
 export:
@@ -36,6 +36,19 @@ ask:
 ## 5. the 30-case eval set, in-process against the same pipeline; exit 1 below 80 % strict
 eval:
 	dotnet run --project src/SupportRag.Eval -- --json eval/latest.json --min 0.8
+
+## 6. the same cases through another generator, written to eval/generators/<model>.json:
+##    make eval-model MODEL=@cf/meta/llama-3.1-8b-instruct-fp8-fast   (CLOUDFLARE_API_TOKEN in the environment)
+##    make eval-model MODEL=claude-haiku-5-5                            (ANTHROPIC_API_KEY; the baseline row)
+MODEL ?= claude-haiku-5-5
+GENERATOR = $(if $(findstring @cf/,$(MODEL)),WorkersAi,Anthropic)
+SLUG = $(subst /,-,$(subst @cf/,,$(MODEL)))
+eval-model:
+	Rag__Generator=$(GENERATOR) Rag__Model=$(MODEL) Rag__WorkersAi__ChatModel=$(MODEL) dotnet run --project src/SupportRag.Eval -- --json eval/generators/$(SLUG).json
+
+## 7. the comparison: scores, tokens and list-price dollars, one row per run
+compare:
+	python3 eval/cost.py eval/generators/*.json
 
 test:
 	dotnet test
